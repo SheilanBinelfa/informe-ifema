@@ -358,6 +358,7 @@ if btn_calculate and selected_emp:
         col_horas_j = find_col(df_jornadas, ["Tiempo trabajado", "Horas"])
         col_tipo_dia = find_col(df_jornadas, ["Tipo de día", "Tipo dia"])
         col_tipo_fes = find_col(df_jornadas, ["Tipo de festivo"])
+        col_dif = find_col(df_jornadas, ["Diferencia con horas especiales", "Diferencia"])
 
         jornadas_emp = df_jornadas[
             df_jornadas[col_emp_j].apply(lambda x: normalize(x) == normalize(selected_emp))
@@ -388,6 +389,7 @@ if btn_calculate and selected_emp:
                 tf = str(row.get(col_tipo_fes, "")).strip()
                 es_sdf = tf != "" and tf.lower() != "nan"
 
+            dif_lab = 0.0
             if es_sdf:
                 plusSDF += h
                 if h > 7:
@@ -395,13 +397,30 @@ if btn_calculate and selected_emp:
                 if h > 4:
                     compFes += h - 4
             else:
-                if h > 7:
-                    hCompLab += h - 7
+                # H.Comp.Laborables: usar columna Diferencia si existe
+                if col_dif:
+                    try:
+                        dif_lab = float(str(row[col_dif]).replace(",", "."))
+                    except (ValueError, TypeError):
+                        dif_lab = 0.0
+                    hCompLab += dif_lab
+                else:
+                    # Fallback: registrado - planificado
+                    col_plan = find_col(df_jornadas, ["Tiempo planificado", "Planificado"])
+                    plan = 0.0
+                    if col_plan:
+                        try:
+                            plan = float(str(row[col_plan]).replace(",", "."))
+                        except (ValueError, TypeError):
+                            plan = 0.0
+                    dif_lab = h - plan
+                    hCompLab += dif_lab
 
             detalle.append({
                 "Fecha": f.strftime("%d/%m/%Y"),
                 "Horas": round(h, 2),
                 "Tipo": "Festivo" if es_sdf else "Laborable",
+                "Dif.Lab": round(dif_lab, 2) if not es_sdf else None,
             })
 
         detalle.sort(key=lambda x: x["Fecha"])
@@ -541,7 +560,7 @@ if "result" in st.session_state:
 
     # ─── Concept cards (always shown) ───
     concepts = [
-        ("H. Comp. Laborables", r["hCompLab"], "Exceso > 7h en L-V"),
+        ("H. Comp. Laborables", r["hCompLab"], "Σ diferencias plan. vs reg. en L-V"),
         ("H. Comp. Festivas", r["hCompFes"], "Exceso > 7h en S/D/Fest"),
         ("Plus Sáb/Dom/Fest", r["plusSDF"], "Total horas S/D/Fest"),
         ("Comp. Festivo", r["compFes"], "Exceso > 4h en S/D/Fest"),
@@ -550,8 +569,13 @@ if "result" in st.session_state:
 
     cols = st.columns(4)
     for i, (label, val, tip) in enumerate(concepts):
-        active = "active" if val > 0 else "inactive"
-        color = "#0d7377" if val > 0 else "#d1d5db"
+        active = "active" if val != 0 else "inactive"
+        if val > 0:
+            color = "#0d7377"
+        elif val < 0:
+            color = "#dc2626"
+        else:
+            color = "#d1d5db"
         with cols[i]:
             st.markdown(f"""
             <div class="concept-card {active}">
@@ -574,6 +598,7 @@ if "result" in st.session_state:
                 "Fecha": st.column_config.TextColumn("Fecha", width="medium"),
                 "Horas": st.column_config.NumberColumn("Horas", format="%.2f"),
                 "Tipo": st.column_config.TextColumn("Tipo", width="small"),
+                "Dif.Lab": st.column_config.NumberColumn("Dif. Laborable", format="%.2f", help="Diferencia planificado vs registrado en días laborables"),
             },
         )
     else:
