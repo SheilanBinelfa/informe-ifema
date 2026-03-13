@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from io import BytesIO
 
 # ─── Page Config ───
@@ -15,43 +15,27 @@ st.set_page_config(
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');
-    
     html, body, [class*="css"] { font-family: 'Nunito', sans-serif; }
-    
     .main-header {
         background: linear-gradient(135deg, #0d7377, #0a5c5f);
-        padding: 1.5rem 2rem;
-        border-radius: 12px;
-        color: white;
-        margin-bottom: 1.5rem;
+        padding: 1.5rem 2rem; border-radius: 12px; color: white; margin-bottom: 1.5rem;
     }
     .main-header h1 { margin: 0; font-size: 1.4rem; font-weight: 900; }
     .main-header p { margin: 0; font-size: 0.75rem; opacity: 0.7; }
-    
     .metric-card {
-        background: white;
-        border: 1px solid #e8ecf1;
-        border-radius: 14px;
-        padding: 1.2rem;
-        text-align: center;
+        background: white; border: 1px solid #e8ecf1; border-radius: 14px;
+        padding: 1.2rem; text-align: center;
     }
     .metric-card .label { font-size: 0.65rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.08em; }
     .metric-card .value { font-size: 2rem; font-weight: 900; margin-top: 0.3rem; }
-    
     .metric-accent {
         background: linear-gradient(135deg, #0d7377, #0a5c5f);
-        border: none;
-        color: white;
-        box-shadow: 0 8px 24px rgba(13, 115, 119, 0.25);
+        border: none; color: white; box-shadow: 0 8px 24px rgba(13, 115, 119, 0.25);
     }
     .metric-accent .label { color: rgba(255,255,255,0.7); }
     .metric-accent .value { color: white; }
-    
     .concept-card {
-        background: white;
-        border: 1.5px solid #e8ecf1;
-        border-radius: 12px;
-        padding: 1rem;
+        background: white; border: 1.5px solid #e8ecf1; border-radius: 12px; padding: 1rem;
     }
     .concept-card.active { border-color: #b2e0e0; }
     .concept-card .clabel { font-size: 0.6rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; }
@@ -59,31 +43,36 @@ st.markdown("""
     .concept-card .ctip { font-size: 0.6rem; color: #c4c9d2; margin-top: 0.2rem; }
     .concept-card.inactive { opacity: 0.35; }
     .concept-card.inactive .cvalue { color: #d1d5db; }
-    
+    .badge-fin { background: #fef2f2; color: #dc2626; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem; font-weight: 700; }
+    .badge-activo { background: #f0fdf4; color: #16a34a; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem; font-weight: 700; }
+    .mode-banner {
+        padding: 0.6rem 1rem; border-radius: 8px; font-size: 0.75rem; font-weight: 700;
+        margin-bottom: 1rem; display: flex; align-items: center; gap: 8px;
+    }
+    .mode-liq { background: #fef2f2; color: #dc2626; border: 1px solid #fee2e2; }
+    .mode-mens { background: #eff6ff; color: #2563eb; border: 1px solid #dbeafe; }
     div[data-testid="stSidebar"] { background: white; }
-    .stDownloadButton button { 
-        background: #059669 !important; 
-        color: white !important; 
-        border: none !important;
-        font-weight: 700 !important;
+    .stDownloadButton button {
+        background: #059669 !important; color: white !important;
+        border: none !important; font-weight: 700 !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─── Helper Functions ───
+# ─── Helpers ───
 def parse_date(val):
-    """Parse dates from various formats"""
     if pd.isna(val) or val is None or val == "":
         return None
     if isinstance(val, datetime):
         return val
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time())
     if isinstance(val, pd.Timestamp):
         return val.to_pydatetime()
     s = str(val).strip().strip('"')
     if not s:
         return None
-    # Try dd/mm/yyyy or dd-mm-yyyy
     for fmt in ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"]:
         try:
             return datetime.strptime(s, fmt)
@@ -96,14 +85,13 @@ def parse_date(val):
 
 
 def find_col(df, keywords):
-    """Find a column by trying multiple keyword matches"""
+    if df is None or df.empty:
+        return None
     cols = df.columns.tolist()
-    # Exact match first
     for kw in keywords:
         for c in cols:
             if c.lower().strip().strip('"') == kw.lower().strip():
                 return c
-    # Partial match
     for kw in keywords:
         for c in cols:
             if kw.lower().strip() in c.lower().strip().strip('"'):
@@ -112,22 +100,20 @@ def find_col(df, keywords):
 
 
 def normalize(val):
-    """Normalize employee name for matching"""
     return str(val or "").replace('"', '').replace(',', '').replace(' ', '').upper()
 
 
 def read_file(uploaded):
-    """Read uploaded file (xlsx, xls, or csv)"""
     if uploaded is None:
         return None
     name = uploaded.name.lower()
     try:
         if name.endswith(".csv") or name.endswith(".tsv") or name.endswith(".txt"):
-            # Try different separators
             content = uploaded.getvalue().decode("utf-8", errors="replace")
-            if "\t" in content.split("\n")[0]:
+            first_line = content.split("\n")[0]
+            if "\t" in first_line:
                 return pd.read_csv(uploaded, sep="\t")
-            elif ";" in content.split("\n")[0]:
+            elif ";" in first_line:
                 uploaded.seek(0)
                 return pd.read_csv(uploaded, sep=";")
             else:
@@ -140,33 +126,57 @@ def read_file(uploaded):
         return None
 
 
-def get_employees(dfs):
-    """Extract unique employee names from multiple dataframes"""
+def get_employees_with_status(df_contratos, df_jornadas, df_absentismos):
+    """Returns list of (name, has_end_date, end_date_str) tuples"""
     keywords = ["Empleado", "Nombre", "Persona", "Trabajador"]
-    employees = set()
-    for df in dfs:
+    employees = {}  # norm_name -> (display_name, has_end, end_str)
+
+    # Get names from all sources
+    for df in [df_contratos, df_jornadas, df_absentismos]:
         if df is None or df.empty:
             continue
         col = find_col(df, keywords)
-        if col:
-            for val in df[col].dropna().unique():
-                name = str(val).strip().strip('"')
-                if name and name.upper() != "UNDEFINED":
-                    employees.add(name)
-    return sorted(employees)
+        if not col:
+            continue
+        for val in df[col].dropna().unique():
+            name = str(val).strip().strip('"')
+            if name and name.upper() != "UNDEFINED":
+                n = normalize(name)
+                if n not in employees:
+                    employees[n] = (name, False, None)
+
+    # Check contract end dates
+    if df_contratos is not None and not df_contratos.empty:
+        col_emp = find_col(df_contratos, keywords)
+        col_fin = find_col(df_contratos, ["Fecha fin", "Hasta"])
+        col_fin_prev = find_col(df_contratos, ["Fecha fin prevista"])
+
+        if col_emp:
+            for _, row in df_contratos.iterrows():
+                name = str(row[col_emp]).strip().strip('"')
+                n = normalize(name)
+                f_fin = None
+                if col_fin:
+                    f_fin = parse_date(row[col_fin])
+                if not f_fin and col_fin_prev:
+                    f_fin = parse_date(row[col_fin_prev])
+
+                if n in employees:
+                    if f_fin:
+                        employees[n] = (employees[n][0], True, f_fin.strftime("%d/%m/%Y"))
+                    else:
+                        employees[n] = (employees[n][0], False, None)
+
+    return sorted(employees.values(), key=lambda x: x[0])
 
 
-def export_to_excel(result):
-    """Generate Excel file from results"""
+def export_to_excel(result, mode):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         wb = writer.book
-
-        # Summary sheet
         ws = wb.add_worksheet("Liquidación")
         writer.sheets["Liquidación"] = ws
 
-        # Formats
         title_fmt = wb.add_format({"bold": True, "font_size": 14, "font_color": "#0d7377"})
         header_fmt = wb.add_format({"bold": True, "font_size": 11, "bg_color": "#e8f6f6", "border": 1})
         num_fmt = wb.add_format({"num_format": "0.00", "font_size": 11})
@@ -175,17 +185,20 @@ def export_to_excel(result):
         accent_fmt = wb.add_format({"bold": True, "font_size": 14, "font_color": "#0d7377", "num_format": "0.00"})
 
         r = 0
-        ws.write(r, 0, "LIQUIDACIÓN ETT — IFEMA", title_fmt); r += 2
+        titulo = "LIQUIDACIÓN ETT — IFEMA" if mode == "liquidacion" else "CÁLCULO MENSUAL HORAS — IFEMA"
+        ws.write(r, 0, titulo, title_fmt); r += 2
         ws.write(r, 0, "Empleado", bold_fmt); ws.write(r, 1, result["empleado"]); r += 1
-        ws.write(r, 0, "Fecha fin contrato", bold_fmt); ws.write(r, 1, result["f_fin"]); r += 1
+        if mode == "liquidacion":
+            ws.write(r, 0, "Fecha fin contrato", bold_fmt); ws.write(r, 1, result.get("f_fin", "")); r += 1
         ws.write(r, 0, "Fecha informe", bold_fmt); ws.write(r, 1, datetime.now().strftime("%d/%m/%Y")); r += 2
 
-        ws.write(r, 0, "VACACIONES", title_fmt); r += 1
-        ws.write(r, 0, "Periodo devengo", bold_fmt); ws.write(r, 1, result["per_dev"]); r += 1
-        ws.write(r, 0, "Días devengo", bold_fmt); ws.write(r, 1, result["dias_dev"]); r += 1
-        ws.write(r, 0, "Devengadas", bold_fmt); ws.write(r, 1, result["dev"], num3_fmt); r += 1
-        ws.write(r, 0, "Disfrutadas", bold_fmt); ws.write(r, 1, result["dis"], num_fmt); r += 1
-        ws.write(r, 0, "SALDO VACACIONES", bold_fmt); ws.write(r, 1, result["saldo"], accent_fmt); r += 2
+        if mode == "liquidacion":
+            ws.write(r, 0, "VACACIONES", title_fmt); r += 1
+            ws.write(r, 0, "Periodo devengo", bold_fmt); ws.write(r, 1, result["per_dev"]); r += 1
+            ws.write(r, 0, "Días devengo", bold_fmt); ws.write(r, 1, result["dias_dev"]); r += 1
+            ws.write(r, 0, "Devengadas", bold_fmt); ws.write(r, 1, result["dev"], num3_fmt); r += 1
+            ws.write(r, 0, "Disfrutadas", bold_fmt); ws.write(r, 1, result["dis"], num_fmt); r += 1
+            ws.write(r, 0, "SALDO VACACIONES", bold_fmt); ws.write(r, 1, result["saldo"], accent_fmt); r += 2
 
         ws.write(r, 0, "CONCEPTOS HORA", title_fmt); ws.write(r, 1, "Periodo: " + result["per_rev"]); r += 1
         for label, key in [("H.Comp.Laborables", "hCompLab"), ("H.Comp.Festivas", "hCompFes"),
@@ -193,7 +206,6 @@ def export_to_excel(result):
             ws.write(r, 0, label, bold_fmt); ws.write(r, 1, result[key], num_fmt); r += 1
         r += 1
 
-        # Detail sheet
         if result["detalle"]:
             df_det = pd.DataFrame(result["detalle"])
             df_det.to_excel(writer, sheet_name="Detalle Jornadas", index=False)
@@ -221,28 +233,52 @@ with st.sidebar:
     f_jornadas = st.file_uploader("Jornadas", type=["xlsx", "xls", "csv"], key="jornadas")
     f_absentismos = st.file_uploader("Absentismos (opcional)", type=["xlsx", "xls", "csv"], key="absentismos")
 
-    # Read files
     df_contratos = read_file(f_contratos)
     df_jornadas = read_file(f_jornadas)
     df_absentismos = read_file(f_absentismos)
 
     st.markdown("---")
 
-    # Employee selector
-    employees = get_employees([df_contratos, df_jornadas, df_absentismos])
+    # Employee selector with status
+    emp_list = get_employees_with_status(df_contratos, df_jornadas, df_absentismos)
     st.markdown("##### 👤 Empleado")
-    if employees:
-        selected_emp = st.selectbox("Seleccionar", employees, label_visibility="collapsed")
+
+    if emp_list:
+        # Build display options
+        options = []
+        for name, has_end, end_str in emp_list:
+            if has_end:
+                options.append(f"🔴 {name}  (Fin: {end_str})")
+            else:
+                options.append(f"🟢 {name}  (Activo)")
+
+        selected_idx = st.selectbox(
+            "Seleccionar",
+            range(len(options)),
+            format_func=lambda i: options[i],
+            label_visibility="collapsed",
+        )
+        selected_emp = emp_list[selected_idx][0]
+        emp_has_end = emp_list[selected_idx][1]
     else:
         selected_emp = None
+        emp_has_end = False
         st.info("Sube un archivo para ver empleados")
 
     st.markdown("---")
 
     # Config
     st.markdown("##### ⚙️ Configuración")
-    fecha_corte = st.date_input("Fecha de corte (último día pagado)", value=datetime(2026, 3, 1))
-    st.caption("Horas calculadas desde el día siguiente")
+    fecha_corte = st.date_input("Fecha de corte (último día pagado)",
+                                 value=datetime(2026, 3, 1),
+                                 help="Horas calculadas desde el día siguiente")
+
+    if selected_emp and not emp_has_end:
+        fecha_hasta = st.date_input("Fecha hasta (cálculo horas)",
+                                     value=datetime.now().date(),
+                                     help="Para empleados activos: calcular horas hasta esta fecha")
+    else:
+        fecha_hasta = None
 
     with st.expander("Configuración avanzada"):
         col1, col2 = st.columns(2)
@@ -254,8 +290,21 @@ with st.sidebar:
         periodo_filtro = st.text_input("Periodo filtro absentismos", value="2026")
 
     st.markdown("---")
-    btn_calculate = st.button("🔄 Calcular liquidación", type="primary", use_container_width=True,
-                               disabled=not (df_contratos is not None and df_jornadas is not None and selected_emp))
+
+    # Dynamic button text
+    if selected_emp and emp_has_end:
+        btn_label = "🔴 Calcular LIQUIDACIÓN"
+    elif selected_emp:
+        btn_label = "🟢 Calcular HORAS MENSUALES"
+    else:
+        btn_label = "Calcular"
+
+    btn_calculate = st.button(
+        btn_label,
+        type="primary",
+        use_container_width=True,
+        disabled=not (df_contratos is not None and df_jornadas is not None and selected_emp),
+    )
 
 
 # ─── MAIN ───
@@ -266,8 +315,12 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+
 if btn_calculate and selected_emp:
     try:
+        # ─── Determine mode ───
+        mode = "liquidacion" if emp_has_end else "mensual"
+
         # ─── Find contract ───
         col_emp_ct = find_col(df_contratos, ["Empleado", "Nombre", "Persona"])
         ct_match = df_contratos[df_contratos[col_emp_ct].apply(lambda x: normalize(x) == normalize(selected_emp))]
@@ -282,22 +335,19 @@ if btn_calculate and selected_emp:
         col_fin_prev = find_col(df_contratos, ["Fecha fin prevista"])
 
         f_inicio = parse_date(ct[col_ini]) if col_ini else None
-        f_fin = parse_date(ct[col_fin]) if col_fin else None
+        f_fin = None
+        if col_fin:
+            f_fin = parse_date(ct[col_fin])
         if not f_fin and col_fin_prev:
             f_fin = parse_date(ct[col_fin_prev])
 
-        if not f_fin:
-            st.error("El empleado no tiene fecha fin de contrato válida.")
-            st.stop()
-
-        # ─── Vacation calculation ───
-        d_ini_ciclo = datetime.combine(inicio_ciclo, datetime.min.time())
-        d_fin_ciclo = datetime.combine(fin_ciclo, datetime.min.time())
-        ciclo_total = (d_fin_ciclo - d_ini_ciclo).days + 1
-
-        dev_ini = max(f_inicio, d_ini_ciclo) if f_inicio else d_ini_ciclo
-        dias_dev = max(0, (f_fin - dev_ini).days + 1)
-        devengadas = (dias_dev * max_vac) / ciclo_total
+        # ─── Determine end date for hours calc ───
+        if mode == "liquidacion" and f_fin:
+            horas_hasta = f_fin
+        elif fecha_hasta:
+            horas_hasta = datetime.combine(fecha_hasta, datetime.min.time())
+        else:
+            horas_hasta = datetime.now()
 
         # ─── Hours calculation ───
         d_corte = datetime.combine(fecha_corte, datetime.min.time())
@@ -309,7 +359,9 @@ if btn_calculate and selected_emp:
         col_tipo_dia = find_col(df_jornadas, ["Tipo de día", "Tipo dia"])
         col_tipo_fes = find_col(df_jornadas, ["Tipo de festivo"])
 
-        jornadas_emp = df_jornadas[df_jornadas[col_emp_j].apply(lambda x: normalize(x) == normalize(selected_emp))].copy()
+        jornadas_emp = df_jornadas[
+            df_jornadas[col_emp_j].apply(lambda x: normalize(x) == normalize(selected_emp))
+        ].copy()
 
         hCompLab = 0.0
         hCompFes = 0.0
@@ -319,9 +371,8 @@ if btn_calculate and selected_emp:
 
         for _, row in jornadas_emp.iterrows():
             f = parse_date(row[col_fecha_j])
-            if not f or f < rev_ini or f > f_fin:
+            if not f or f < rev_ini or f > horas_hasta:
                 continue
-            h = 0.0
             try:
                 h = float(str(row[col_horas_j]).replace(",", "."))
             except (ValueError, TypeError):
@@ -350,41 +401,59 @@ if btn_calculate and selected_emp:
             detalle.append({
                 "Fecha": f.strftime("%d/%m/%Y"),
                 "Horas": round(h, 2),
-                "Tipo": "Festivo" if es_sdf else "Laborable"
+                "Tipo": "Festivo" if es_sdf else "Laborable",
             })
 
         detalle.sort(key=lambda x: x["Fecha"])
 
-        # ─── Absences ───
+        # ─── Vacation calc (only liquidacion mode) ───
+        devengadas = 0.0
         disfrutadas = 0.0
-        if df_absentismos is not None and not df_absentismos.empty:
-            col_emp_a = find_col(df_absentismos, ["Empleado", "Nombre"])
-            col_dur_a = find_col(df_absentismos, ["Duración", "Valor"])
-            col_uni_a = find_col(df_absentismos, ["Unidad"])
-            col_per_a = find_col(df_absentismos, ["Periodo", "Año"])
+        saldo = 0.0
+        dias_dev = 0
+        per_dev = ""
 
-            abs_emp = df_absentismos[df_absentismos[col_emp_a].apply(lambda x: normalize(x) == normalize(selected_emp))]
+        if mode == "liquidacion" and f_fin:
+            d_ini_ciclo = datetime.combine(inicio_ciclo, datetime.min.time())
+            d_fin_ciclo = datetime.combine(fin_ciclo, datetime.min.time())
+            ciclo_total = (d_fin_ciclo - d_ini_ciclo).days + 1
 
-            if periodo_filtro and col_per_a:
-                abs_emp = abs_emp[abs_emp[col_per_a].astype(str).str.strip() == periodo_filtro]
+            dev_ini = max(f_inicio, d_ini_ciclo) if f_inicio else d_ini_ciclo
+            dias_dev = max(0, (f_fin - dev_ini).days + 1)
+            devengadas = (dias_dev * max_vac) / ciclo_total
+            per_dev = f"{dev_ini.strftime('%d/%m/%Y')} – {f_fin.strftime('%d/%m/%Y')}"
 
-            for _, row in abs_emp.iterrows():
-                try:
-                    val = float(str(row[col_dur_a]).replace(",", "."))
-                except (ValueError, TypeError):
-                    continue
-                if col_uni_a and "hora" in str(row[col_uni_a]).lower():
-                    val = val / 7
-                disfrutadas += val
+            # Absences
+            if df_absentismos is not None and not df_absentismos.empty:
+                col_emp_a = find_col(df_absentismos, ["Empleado", "Nombre"])
+                col_dur_a = find_col(df_absentismos, ["Duración", "Valor"])
+                col_uni_a = find_col(df_absentismos, ["Unidad"])
+                col_per_a = find_col(df_absentismos, ["Periodo", "Año"])
 
-        saldo = devengadas - disfrutadas
+                abs_emp = df_absentismos[
+                    df_absentismos[col_emp_a].apply(lambda x: normalize(x) == normalize(selected_emp))
+                ]
+                if periodo_filtro and col_per_a:
+                    abs_emp = abs_emp[abs_emp[col_per_a].astype(str).str.strip() == periodo_filtro]
 
-        # ─── Store result ───
+                for _, row in abs_emp.iterrows():
+                    try:
+                        val = float(str(row[col_dur_a]).replace(",", "."))
+                    except (ValueError, TypeError):
+                        continue
+                    if col_uni_a and "hora" in str(row[col_uni_a]).lower():
+                        val = val / 7
+                    disfrutadas += val
+
+            saldo = devengadas - disfrutadas
+
+        # ─── Build result ───
         result = {
+            "mode": mode,
             "empleado": selected_emp,
-            "f_fin": f_fin.strftime("%d/%m/%Y"),
-            "per_dev": f"{dev_ini.strftime('%d/%m/%Y')} – {f_fin.strftime('%d/%m/%Y')}",
-            "per_rev": f"{rev_ini.strftime('%d/%m/%Y')} – {f_fin.strftime('%d/%m/%Y')}",
+            "f_fin": f_fin.strftime("%d/%m/%Y") if f_fin else None,
+            "per_rev": f"{rev_ini.strftime('%d/%m/%Y')} – {horas_hasta.strftime('%d/%m/%Y')}",
+            "per_dev": per_dev,
             "dias_dev": dias_dev,
             "dev": round(devengadas, 3),
             "dis": round(disfrutadas, 2),
@@ -402,57 +471,75 @@ if btn_calculate and selected_emp:
         import traceback
         st.code(traceback.format_exc())
 
+
 # ─── Display Results ───
 if "result" in st.session_state:
     r = st.session_state["result"]
+    is_liq = r["mode"] == "liquidacion"
 
-    # Header
+    # Mode banner
+    if is_liq:
+        st.markdown(f'<div class="mode-banner mode-liq">🔴 LIQUIDACIÓN — Empleado con fin de contrato ({r["f_fin"]})</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="mode-banner mode-mens">🟢 CÁLCULO MENSUAL — Empleado activo (sin fin de contrato)</div>', unsafe_allow_html=True)
+
+    # Header + export
     col_head, col_export = st.columns([3, 1])
     with col_head:
+        badges = ""
+        if is_liq:
+            badges += f'<span style="padding:3px 10px; border-radius:6px; background:#fef2f2; font-size:0.65rem; font-weight:700; color:#dc2626;">Baja: {r["f_fin"]}</span>'
+            badges += f' <span style="padding:3px 10px; border-radius:6px; background:#e8f6f6; font-size:0.65rem; font-weight:700; color:#0d7377;">Devengo: {r["dias_dev"]}d</span>'
+        badges += f' <span style="padding:3px 10px; border-radius:6px; background:#f4f5f8; font-size:0.65rem; font-weight:700; color:#9ca3af;">Horas: {r["per_rev"]}</span>'
+
         st.markdown(f"""
         <div style="background:white; border:1px solid #e8ecf1; border-radius:14px; padding:1.2rem 1.5rem; margin-bottom:1rem;">
-            <div style="font-size:0.65rem; font-weight:700; color:#0d7377; text-transform:uppercase; letter-spacing:0.1em;">Liquidación</div>
-            <div style="font-size:1.4rem; font-weight:900; color:#111827; margin-top:0.2rem;">{r['empleado']}</div>
-            <div style="display:flex; gap:6px; margin-top:0.5rem; flex-wrap:wrap;">
-                <span style="padding:3px 10px; border-radius:6px; background:#e8f6f6; font-size:0.65rem; font-weight:700; color:#0d7377;">Baja: {r['f_fin']}</span>
-                <span style="padding:3px 10px; border-radius:6px; background:#f4f5f8; font-size:0.65rem; font-weight:700; color:#9ca3af;">Devengo: {r['dias_dev']}d</span>
+            <div style="font-size:0.65rem; font-weight:700; color:#0d7377; text-transform:uppercase; letter-spacing:0.1em;">
+                {"Liquidación" if is_liq else "Cálculo mensual"}
             </div>
+            <div style="font-size:1.4rem; font-weight:900; color:#111827; margin-top:0.2rem;">{r['empleado']}</div>
+            <div style="display:flex; gap:6px; margin-top:0.5rem; flex-wrap:wrap;">{badges}</div>
         </div>
         """, unsafe_allow_html=True)
     with col_export:
         st.markdown("<br>", unsafe_allow_html=True)
-        xlsx_data = export_to_excel(r)
-        st.download_button("📥 Descargar .xlsx", data=xlsx_data,
-                          file_name=f"Liquidacion_{r['empleado'].replace(' ', '_')}.xlsx",
-                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        xlsx_data = export_to_excel(r, r["mode"])
+        filename = "Liquidacion" if is_liq else "Horas_Mensual"
+        st.download_button(
+            "📥 Descargar .xlsx",
+            data=xlsx_data,
+            file_name=f"{filename}_{r['empleado'].replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
-    # Vacation cards
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="label">Devengadas</div>
-            <div class="value" style="color:#374151;">{r['dev']:.3f}</div>
-            <div style="font-size:0.65rem; color:#c4c9d2;">días</div>
-        </div>""", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="label">Disfrutadas</div>
-            <div class="value" style="color:#dc2626;">{r['dis']:.2f}</div>
-            <div style="font-size:0.65rem; color:#c4c9d2;">días</div>
-        </div>""", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"""
-        <div class="metric-card metric-accent">
-            <div class="label">Saldo Vacaciones</div>
-            <div class="value">{r['saldo']:.2f}</div>
-            <div style="font-size:0.65rem; color:rgba(255,255,255,0.6);">días a liquidar</div>
-        </div>""", unsafe_allow_html=True)
+    # ─── Vacation cards (only liquidacion) ───
+    if is_liq:
+        st.markdown("<div style='font-size:0.65rem; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:0.5rem;'>Vacaciones en finiquito</div>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Devengadas</div>
+                <div class="value" style="color:#374151;">{r['dev']:.3f}</div>
+                <div style="font-size:0.65rem; color:#c4c9d2;">días</div>
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Disfrutadas (per. {st.session_state.get('periodo_filtro', '2026')})</div>
+                <div class="value" style="color:#dc2626;">{r['dis']:.2f}</div>
+                <div style="font-size:0.65rem; color:#c4c9d2;">días</div>
+            </div>""", unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"""
+            <div class="metric-card metric-accent">
+                <div class="label">Saldo Vacaciones</div>
+                <div class="value">{r['saldo']:.2f}</div>
+                <div style="font-size:0.65rem; color:rgba(255,255,255,0.6);">días a liquidar</div>
+            </div>""", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Concept cards
+    # ─── Concept cards (always shown) ───
     concepts = [
         ("H. Comp. Laborables", r["hCompLab"], "Exceso > 7h en L-V"),
         ("H. Comp. Festivas", r["hCompFes"], "Exceso > 7h en S/D/Fest"),
@@ -475,16 +562,22 @@ if "result" in st.session_state:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Detail table
+    # ─── Detail table (always shown) ───
     if r["detalle"]:
         st.markdown(f"<div style='font-size:0.65rem; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:0.5rem;'>Detalle jornadas · {len(r['detalle'])} días</div>", unsafe_allow_html=True)
         df_det = pd.DataFrame(r["detalle"])
-        st.dataframe(df_det, use_container_width=True, hide_index=True,
-                     column_config={
-                         "Fecha": st.column_config.TextColumn("Fecha", width="medium"),
-                         "Horas": st.column_config.NumberColumn("Horas", format="%.2f"),
-                         "Tipo": st.column_config.TextColumn("Tipo", width="small"),
-                     })
+        st.dataframe(
+            df_det,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Fecha": st.column_config.TextColumn("Fecha", width="medium"),
+                "Horas": st.column_config.NumberColumn("Horas", format="%.2f"),
+                "Tipo": st.column_config.TextColumn("Tipo", width="small"),
+            },
+        )
+    else:
+        st.info("No se encontraron jornadas en el periodo indicado.")
 
 elif not btn_calculate:
     # Empty state
@@ -492,8 +585,10 @@ elif not btn_calculate:
     <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:4rem 0; color:#9ca3af;">
         <div style="width:80px; height:80px; border-radius:20px; background:#e8f6f6; display:flex; align-items:center; justify-content:center; margin-bottom:1.2rem; font-size:2rem;">📋</div>
         <div style="font-size:0.9rem; font-weight:800; color:#374151;">Panel de liquidación</div>
-        <div style="font-size:0.75rem; color:#9ca3af; max-width:260px; text-align:center; margin-top:0.3rem; line-height:1.6;">
-            Carga los informes de Endalia, selecciona un empleado y pulsa calcular
+        <div style="font-size:0.75rem; color:#9ca3af; max-width:320px; text-align:center; margin-top:0.3rem; line-height:1.6;">
+            Carga los informes de Endalia y selecciona un empleado.<br>
+            <strong style="color:#dc2626;">🔴 Con fecha fin</strong> = liquidación completa<br>
+            <strong style="color:#16a34a;">🟢 Sin fecha fin</strong> = solo horas mensuales
         </div>
     </div>
     """, unsafe_allow_html=True)
