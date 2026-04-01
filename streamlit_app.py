@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import math
 from datetime import datetime, timedelta, date
 from io import BytesIO
 
@@ -43,8 +44,6 @@ st.markdown("""
     .concept-card .ctip { font-size: 0.55rem; color: #c4c9d2; margin-top: 0.2rem; }
     .concept-card.inactive { opacity: 0.35; }
     .concept-card.inactive .cvalue { color: #d1d5db; }
-    .badge-fin { background: #fef2f2; color: #dc2626; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem; font-weight: 700; }
-    .badge-activo { background: #f0fdf4; color: #16a34a; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem; font-weight: 700; }
     .mode-banner {
         padding: 0.6rem 1rem; border-radius: 8px; font-size: 0.75rem; font-weight: 700;
         margin-bottom: 1rem; display: flex; align-items: center; gap: 8px;
@@ -85,20 +84,23 @@ def parse_date(val):
 
 
 def parse_time_to_hours(val):
-    """Parse time string like '23:30' or '06:15' to decimal hours (23.5, 6.25)"""
+    """Parse time string like '23:30' or '06:15' to decimal hours. Also handles '(+1)' suffix."""
     if pd.isna(val) or val is None:
-        return None
+        return None, False
     s = str(val).strip().strip('"')
     if not s:
-        return None
+        return None, False
+    next_day = "(+1)" in s
+    s_clean = s.replace("(+1)", "").strip()
     import re
-    m = re.match(r'(\d{1,2}):(\d{2})', s)
+    m = re.match(r'(\d{1,2}):(\d{2})', s_clean)
     if m:
-        return int(m.group(1)) + int(m.group(2)) / 60
+        h = int(m.group(1)) + int(m.group(2)) / 60
+        return h, next_day
     try:
-        return float(s.replace(",", "."))
+        return float(s_clean.replace(",", ".")), next_day
     except (ValueError, TypeError):
-        return None
+        return None, next_day
 
 
 def find_col(df, keywords):
@@ -152,11 +154,11 @@ def read_file(uploaded):
         return None
 
 
-def get_employees_with_status(df_contratos, df_jornadas, df_tramos, df_absentismos):
+def get_employees_with_status(df_contratos, df_jornadas, df_absentismos):
     keywords = ["Empleado", "Nombre", "Persona", "Trabajador"]
     employees = {}
 
-    for df in [df_contratos, df_jornadas, df_tramos, df_absentismos]:
+    for df in [df_contratos, df_jornadas, df_absentismos]:
         if df is None or df.empty:
             continue
         col = find_col(df, keywords)
@@ -192,43 +194,82 @@ def get_employees_with_status(df_contratos, df_jornadas, df_tramos, df_absentism
     return sorted(employees.values(), key=lambda x: x[0])
 
 
-def calc_night_hours(h_ini, h_fin):
-    """Calculate complete hours between 22:00-06:00 given start/end decimal hours.
+def calc_night_hours_from_jornada(h_ini_val, h_fin_val):
+    """Calculate night hours from Jornadas cols N (hora inicio) and O (hora fin).
     Returns (plus_noct_hours, is_comp_nocturno)
-    - plus_noct_hours: complete hours in 22:00-06:00 range
-    - is_comp_nocturno: True if end >= 23:00 (or next day)
     """
+    h_ini, _ = parse_time_to_hours(h_ini_val)
+    h_fin, is_next_day = parse_time_to_hours(h_fin_val)
+
     if h_ini is None or h_fin is None:
-        return 0, False
+        # Check if at least h_fin exists for comp nocturno
+        is_comp = False
+        if h_fin is not None:
+            is_comp = h_fin >= 23 or is_next_day
+        return 0, is_comp
 
-    # Handle overnight: if end <= start, assume next day
-    overnight = h_fin <= h_ini
-    comp_nocturno = h_fin >= 23 or overnight  # fin >= 23:00 or crosses midnight
+    # Comp nocturno: fin >= 23:00 or next day marker
+    is_comp = h_fin >= 23 or is_next_day
 
-    # Calculate hours in 22:00-06:00 band
+    # Plus nocturnidad: complete hours in 22:00-06:00
     night_h = 0.0
 
-    if overnight:
-        # e.g. 20:00 to 02:00
-        # Part 1: from start to midnight in 22-24 range
+    if is_next_day or h_fin < h_ini:
+        # Overnight shift: e.g. 14:00 to 02:00(+1) or 22:00 to 06:00
+        # Part 1: from start to midnight, count 22:00-24:00
         if h_ini < 22:
-            night_h += min(24, 24) - 22  # 2h from 22 to 00
-        else:
+            night_h += 24 - 22  # 2h from 22 to 00
+        elif h_ini < 24:
             night_h += 24 - h_ini  # from start to midnight
-        # Part 2: from midnight to end in 00-06 range
-        night_h += min(h_fin, 6)
+        # Part 2: from midnight to end, count 00:00-06:00
+        h_fin_effective = h_fin  # already in 0-24 range since next day
+        night_h += min(h_fin_effective, 6)
     else:
         # Same day
-        # 22:00-24:00 portion
-        if h_fin > 22:
-            night_h += min(h_fin, 24) - max(h_ini, 22)
-        # 00:00-06:00 portion
+        # Check 00:00-06:00 portion (early morning shifts)
         if h_ini < 6:
             night_h += min(h_fin, 6) - h_ini
+        # Check 22:00-24:00 portion
+        if h_fin > 22:
+            night_h += min(h_fin, 24) - max(h_ini, 22)
 
     # Only complete hours
     night_h = max(0, int(night_h))
-    return night_h, comp_nocturno
+    return night_h, is_comp
+
+
+def get_contract_start_for_employee(df_contratos, emp_name, corte_date, horas_hasta_date):
+    """Get the most recent contract start date within the period.
+    - If contract started in the calculation period → exclude jornadas before that date
+    - If contract started before the period → no exclusion (return corte+1)
+    - Multiple contracts → use most recent start date within the period
+    """
+    col_emp = find_col(df_contratos, ["Empleado", "Nombre", "Persona"])
+    col_ini = find_col(df_contratos, ["Fecha inicio", "Desde", "Fecha de inicio"])
+
+    if not col_emp or not col_ini:
+        return corte_date + timedelta(days=1)
+
+    ct_match = df_contratos[df_contratos[col_emp].apply(lambda x: normalize(x) == normalize(emp_name))]
+
+    if ct_match.empty:
+        return corte_date + timedelta(days=1)
+
+    rev_ini = corte_date + timedelta(days=1)
+    latest_start_in_period = None
+
+    for _, row in ct_match.iterrows():
+        f_ini = parse_date(row[col_ini])
+        if f_ini and f_ini >= rev_ini and f_ini <= horas_hasta_date:
+            if latest_start_in_period is None or f_ini > latest_start_in_period:
+                latest_start_in_period = f_ini
+
+    # If a contract started in the period, use that date
+    if latest_start_in_period:
+        return latest_start_in_period
+
+    # Otherwise, no exclusion
+    return rev_ini
 
 
 def export_to_excel(result, mode):
@@ -263,13 +304,13 @@ def export_to_excel(result, mode):
         ws.write(r, 0, "CONCEPTOS HORA", title_fmt)
         ws.write(r, 1, "Periodo: " + result["per_rev"]); r += 1
         for label, key in [
-            ("Complementarias L-V", "compLV"),
-            ("Plus SDF", "plusSDF"),
-            ("Festivo H.Comp.", "festHComp"),
-            ("Horas Especiales", "hEspeciales"),
-            ("Complemento Festivo", "compFestivo"),
-            ("Comp. Nocturnos", "compNocturno"),
-            ("Plus Nocturnidad", "plusNoct"),
+            ("Complementarias L-V (h)", "compLV"),
+            ("Plus SDF (h)", "plusSDF"),
+            ("Festivo H.Comp. (h)", "festHComp"),
+            ("Horas Especiales (h)", "hEspeciales"),
+            ("Complemento Festivo (uds)", "compFestivo"),
+            ("Comp. Nocturnos (uds)", "compNocturno"),
+            ("Plus Nocturnidad (h)", "plusNoct"),
         ]:
             ws.write(r, 0, label, bold_fmt)
             ws.write(r, 1, result[key], num_fmt)
@@ -280,7 +321,7 @@ def export_to_excel(result, mode):
             df_det = pd.DataFrame(result["detalle"])
             df_det.to_excel(writer, sheet_name="Detalle Jornadas", index=False)
 
-        ws.set_column(0, 0, 24)
+        ws.set_column(0, 0, 26)
         ws.set_column(1, 1, 18)
 
     return output.getvalue()
@@ -301,18 +342,16 @@ with st.sidebar:
     st.markdown("##### 📂 Informes Endalia")
     f_contratos = st.file_uploader("Contratos", type=["xlsx", "xls", "csv"], key="contratos")
     f_jornadas = st.file_uploader("Jornadas", type=["xlsx", "xls", "csv"], key="jornadas")
-    f_tramos = st.file_uploader("Tramos", type=["xlsx", "xls", "csv"], key="tramos")
     f_absentismos = st.file_uploader("Absentismos (opcional)", type=["xlsx", "xls", "csv"], key="absentismos")
 
     df_contratos = read_file(f_contratos)
     df_jornadas = read_file(f_jornadas)
-    df_tramos = read_file(f_tramos)
     df_absentismos = read_file(f_absentismos)
 
     st.markdown("---")
 
-    # Employee selector with status
-    emp_list = get_employees_with_status(df_contratos, df_jornadas, df_tramos, df_absentismos)
+    # Employee selector
+    emp_list = get_employees_with_status(df_contratos, df_jornadas, df_absentismos)
     st.markdown("##### 👤 Empleado")
 
     if emp_list:
@@ -336,7 +375,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Config
     st.markdown("##### ⚙️ Configuración")
     fecha_corte = st.date_input("Fecha de corte (último día pagado)",
                                  value=datetime(2026, 3, 1),
@@ -415,148 +453,139 @@ if btn_calculate and selected_emp:
         else:
             horas_hasta = datetime.now()
 
-        # ─── JORNADAS: detect columns ───
+        # ─── Dates ───
         d_corte = datetime.combine(fecha_corte, datetime.min.time())
-        rev_ini = d_corte + timedelta(days=1)
 
+        # ─── Contract filter: most recent start in period ───
+        rev_ini = get_contract_start_for_employee(df_contratos, selected_emp, d_corte, horas_hasta)
+
+        # ─── JORNADAS: detect columns ───
         col_emp_j = find_col(df_jornadas, ["Empleado", "Nombre", "Persona"])
         col_fecha_j = find_col(df_jornadas, ["Día registro", "Fecha", "Día de registro"])
-        col_horas_j = find_col(df_jornadas, ["Tiempo trabajado", "Horas"])
-        col_tipo_dia = find_col(df_jornadas, ["Tipo de día", "Tipo dia"])
-        col_tipo_fes = find_col(df_jornadas, ["Tipo de festivo"])
-        col_dif = find_col(df_jornadas, ["Diferencia con horas especiales", "Diferencia"])
+        col_H = find_col(df_jornadas, ["Tiempo trabajado", "Horas"])  # Col H
+        col_S = find_col(df_jornadas, ["PLANIFICADOYABSENTISMO", "Planificado y absentismo"])  # Col S
+        col_tipo_fes = find_col(df_jornadas, ["Tipo de festivo"])  # Col E
+        col_hora_ini = find_col(df_jornadas, ["Hora inicio jornada", "Hora inicio"])  # Col N
+        col_hora_fin = find_col(df_jornadas, ["Hora fin jornada", "Hora fin"])  # Col O
+
+        if not col_S:
+            st.warning("⚠ No se encontró la columna 'PLANIFICADOYABSENTISMO' (col S). Comp. L-V puede no ser precisa.")
 
         jornadas_emp = df_jornadas[
             df_jornadas[col_emp_j].apply(lambda x: normalize(x) == normalize(selected_emp))
         ].copy()
 
-        # ─── TRAMOS: detect columns ───
-        tramos_emp = None
-        col_emp_t = col_fecha_t = col_hini_t = col_hfin_t = None
-        if df_tramos is not None and not df_tramos.empty:
-            col_emp_t = find_col(df_tramos, ["Empleado", "Nombre", "Persona"])
-            col_fecha_t = find_col(df_tramos, ["Día de registro", "Día registro", "Fecha"])
-            col_hini_t = find_col(df_tramos, ["Hora inicio"])
-            col_hfin_t = find_col(df_tramos, ["Hora fin"])
-            if col_emp_t:
-                tramos_emp = df_tramos[
-                    df_tramos[col_emp_t].apply(lambda x: normalize(x) == normalize(selected_emp))
-                ].copy()
+        # Deduplicate: same employee + same day → keep last
+        if col_fecha_j:
+            jornadas_emp = jornadas_emp.drop_duplicates(subset=[col_fecha_j], keep="last")
 
         # ─── Initialize accumulators ───
-        compLV = 0.0       # 1. Complementarias L-V
-        plusSDF = 0.0       # 2. Plus SDF (min(H,7) en sáb/dom/fest)
-        festHComp = 0.0     # 3. Festivo H.Comp (exceso >7h)
-        hEspeciales = 0.0   # 4. Horas Especiales (H>11 → min(H-11,1))
-        compFestivo = 0.0   # 5. Complemento Festivo (sáb/dom, H≥4 → H-4)
-        compNocturno = 0    # 6. Comp. Nocturnos (count of days)
-        plusNoct = 0.0       # 7. Plus Nocturnidad (complete hours 22-06)
-        detalle = []
-
-        # ─── Track nocturno days to avoid double-counting ───
+        compLV = 0.0       # 1. Complementarias L-V: H - S
+        plusSDF = 0.0       # 2. Plus SDF: min(H, 7) en sáb/dom/fest
+        festHComp = 0.0     # 3. Festivo H.Comp: H - 7 si H > 7
+        hEspeciales = 0.0   # 4. Horas Especiales: H > 11 → H - 11 (sin cap)
+        compFestivo = 0     # 5. Comp. Festivo: 1 ud/día sáb/dom si H ≥ 4
+        compNocturno = 0    # 6. Comp. Nocturnos: 1 ud/día si fin ≥ 23:00 o (+1)
+        plusNoct = 0.0       # 7. Plus Nocturnidad: horas completas 22-06
         nocturno_days = set()
+        detalle = []
 
         # ─── Process JORNADAS ───
         for _, row in jornadas_emp.iterrows():
             f = parse_date(row[col_fecha_j])
             if not f or f < rev_ini or f > horas_hasta:
                 continue
-            h = parse_float(row[col_horas_j])
-            if h <= 0:
+
+            H = parse_float(row[col_H])
+            S = parse_float(row[col_S]) if col_S else 0.0
+
+            if H <= 0:
                 continue
 
-            # Detect festivo/SDF
-            es_sdf = False
-            if col_tipo_dia:
-                td = str(row[col_tipo_dia]).lower()
-                es_sdf = "festivo" in td or "semana" in td
+            # ── Detect festivo/SDF ──
+            es_sabdom = f.weekday() in (5, 6)
+            es_sdf = es_sabdom  # Sáb/dom always SDF
+
             if not es_sdf and col_tipo_fes:
+                # Check "Tipo de festivo" column for national/local holidays
                 tf = str(row.get(col_tipo_fes, "")).strip()
-                es_sdf = tf != "" and tf.lower() != "nan"
+                es_sdf = tf != "" and tf.lower() != "nan" and tf.lower() != "fin de semana"
+                # Also check if it says "Fin de semana" (safety)
+                if "fin de semana" in tf.lower():
+                    es_sdf = True
+                    es_sabdom = True
 
-            # Detect sáb/dom specifically (for Comp. Festivo)
-            es_sabdom = f.weekday() in (5, 6)  # 5=Sat, 6=Sun
-
-            dif_lab = 0.0
-            dia_plus_sdf = 0.0
-            dia_fest_hcomp = 0.0
-            dia_h_especiales = 0.0
-            dia_comp_festivo = 0.0
+            # ── Per-day values ──
+            dia_compLV = 0.0
+            dia_plusSDF = 0.0
+            dia_festHComp = 0.0
+            dia_hEsp = 0.0
+            dia_compFest = 0
+            dia_compNoct = 0
+            dia_plusNoct = 0
 
             if es_sdf:
                 # 2. Plus SDF: first 7h
-                dia_plus_sdf = min(h, 7)
-                plusSDF += dia_plus_sdf
+                dia_plusSDF = min(H, 7)
+                plusSDF += dia_plusSDF
 
                 # 3. Festivo H.Comp: excess over 7h
-                if h > 7:
-                    dia_fest_hcomp = h - 7
-                    festHComp += dia_fest_hcomp
+                if H > 7:
+                    dia_festHComp = H - 7
+                    festHComp += dia_festHComp
 
-                # 5. Comp. Festivo: only sáb/dom, H ≥ 4h → H-4
-                if es_sabdom and h >= 4:
-                    dia_comp_festivo = h - 4
-                    compFestivo += dia_comp_festivo
+                # 5. Comp. Festivo: only sáb/dom, H ≥ 4h → 1 unit
+                if es_sabdom and H >= 4:
+                    dia_compFest = 1
+                    compFestivo += 1
             else:
-                # 1. Complementarias L-V: use Diferencia column
-                if col_dif:
-                    dif_lab = parse_float(row[col_dif])
-                    compLV += dif_lab
-                else:
-                    col_plan = find_col(df_jornadas, ["Tiempo planificado", "Planificado"])
-                    plan = parse_float(row[col_plan]) if col_plan else 0.0
-                    dif_lab = h - plan
-                    compLV += dif_lab
+                # 1. Complementarias L-V: H - S
+                dia_compLV = H - S
+                compLV += dia_compLV
 
-            # 4. Horas Especiales: any day, H > 11h → min(H-11, 1)
-            if h > 11:
-                dia_h_especiales = min(h - 11, 1)
-                hEspeciales += dia_h_especiales
+            # 4. Horas Especiales: any day, H > 11h → H - 11 (no cap)
+            if H > 11:
+                dia_hEsp = H - 11
+                hEspeciales += dia_hEsp
 
-            detalle.append({
-                "Fecha": f.strftime("%d/%m/%Y"),
-                "Horas": round(h, 2),
-                "Tipo": "Festivo" if es_sdf else "Laborable",
-                "Dif.L-V": round(dif_lab, 2) if not es_sdf else None,
-                "Plus SDF": round(dia_plus_sdf, 2) if es_sdf else None,
-                "Fest.HComp": round(dia_fest_hcomp, 2) if dia_fest_hcomp > 0 else None,
-                "H.Esp.": round(dia_h_especiales, 2) if dia_h_especiales > 0 else None,
-                "Comp.Fest.": round(dia_comp_festivo, 2) if dia_comp_festivo > 0 else None,
-            })
+            # 6 & 7. Nocturnidad: from Jornadas cols N (inicio) and O (fin)
+            if col_hora_fin:
+                h_fin_raw = row.get(col_hora_fin)
+                h_ini_raw = row.get(col_hora_ini) if col_hora_ini else None
 
-        detalle.sort(key=lambda x: x["Fecha"])
+                night_h, is_comp = calc_night_hours_from_jornada(h_ini_raw, h_fin_raw)
 
-        # ─── Process TRAMOS for nocturnidad ───
-        if tramos_emp is not None and not tramos_emp.empty and col_fecha_t and col_hfin_t:
-            for _, row in tramos_emp.iterrows():
-                f = parse_date(row[col_fecha_t])
-                if not f or f < rev_ini or f > horas_hasta:
-                    continue
-
-                h_ini = parse_time_to_hours(row[col_hini_t]) if col_hini_t else None
-                h_fin = parse_time_to_hours(row[col_hfin_t])
-
-                if h_fin is None:
-                    continue
-
-                night_h, is_comp = calc_night_hours(h_ini, h_fin)
-
-                # 7. Plus Nocturnidad: complete hours in 22-06
+                dia_plusNoct = night_h
                 plusNoct += night_h
 
-                # 6. Comp. Nocturno: 1 unit/day if end >= 23:00
                 if is_comp:
                     day_key = f.strftime("%Y-%m-%d")
                     if day_key not in nocturno_days:
                         nocturno_days.add(day_key)
+                        dia_compNoct = 1
                         compNocturno += 1
 
-        # ─── Round everything ───
+            detalle.append({
+                "Fecha": f.strftime("%d/%m/%Y"),
+                "Horas (H)": round(H, 2),
+                "Plan+Abs (S)": round(S, 2),
+                "Tipo": "Festivo" if es_sdf else "Laborable",
+                "Comp.L-V": round(dia_compLV, 2) if not es_sdf else None,
+                "Plus SDF": round(dia_plusSDF, 2) if es_sdf else None,
+                "Fest.HComp": round(dia_festHComp, 2) if dia_festHComp > 0 else None,
+                "H.Esp.": round(dia_hEsp, 2) if dia_hEsp > 0 else None,
+                "Comp.Fest": dia_compFest if dia_compFest > 0 else None,
+                "Comp.Noct": dia_compNoct if dia_compNoct > 0 else None,
+                "Plus Noct": dia_plusNoct if dia_plusNoct > 0 else None,
+            })
+
+        detalle.sort(key=lambda x: x["Fecha"])
+
+        # ─── Round totals ───
         compLV = round(compLV, 2)
         plusSDF = round(plusSDF, 2)
         festHComp = round(festHComp, 2)
         hEspeciales = round(hEspeciales, 2)
-        compFestivo = round(compFestivo, 2)
         plusNoct = round(plusNoct, 2)
 
         # ─── Vacation calc (only liquidacion mode) ───
@@ -615,6 +644,7 @@ if btn_calculate and selected_emp:
             "compNocturno": compNocturno,
             "plusNoct": plusNoct,
             "detalle": detalle,
+            "col_S_found": col_S is not None,
         }
         st.session_state["result"] = result
 
@@ -629,11 +659,13 @@ if "result" in st.session_state:
     r = st.session_state["result"]
     is_liq = r["mode"] == "liquidacion"
 
-    # Mode banner
     if is_liq:
         st.markdown(f'<div class="mode-banner mode-liq">🔴 LIQUIDACIÓN — Fin de contrato: {r["f_fin"]}</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="mode-banner mode-mens">🟢 CÁLCULO MENSUAL — Empleado activo</div>', unsafe_allow_html=True)
+
+    if not r.get("col_S_found"):
+        st.warning("⚠ Columna 'PLANIFICADOYABSENTISMO' no encontrada. Comp. L-V se calculó como H - 0. Revisa el informe de Jornadas.")
 
     # Header + export
     col_head, col_export = st.columns([3, 1])
@@ -660,7 +692,7 @@ if "result" in st.session_state:
         st.download_button(
             "📥 Descargar .xlsx", data=xlsx_data,
             file_name=f"{filename}_{r['empleado'].replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.document",
         )
 
     # ─── Vacation cards (only liquidacion) ───
@@ -689,17 +721,16 @@ if "result" in st.session_state:
 
     # ─── 7 Concept cards ───
     concepts = [
-        ("Complem. L-V", r["compLV"], "Σ dif. plan vs reg en laborables", "h"),
+        ("Complem. L-V", r["compLV"], "H − S en laborables (neto)", "h"),
         ("Plus SDF", r["plusSDF"], "min(H,7) en sáb/dom/fest", "h"),
-        ("Festivo H.Comp.", r["festHComp"], "Exceso >7h en sáb/dom/fest", "h"),
-        ("Horas Especiales", r["hEspeciales"], "H>11h → min(H-11, 1)", "h"),
-        ("Comp. Festivo", r["compFestivo"], "Sáb/Dom, H≥4h → H-4", "h"),
-        ("Comp. Nocturnos", r["compNocturno"], "1 ud/día si fin ≥ 23:00", "ud"),
+        ("Festivo H.Comp.", r["festHComp"], "H − 7 si H>7 en festivos", "h"),
+        ("Horas Especiales", r["hEspeciales"], "H > 11h → H − 11", "h"),
+        ("Comp. Festivo", r["compFestivo"], "Sáb/Dom, 1 ud si H≥4h", "ud"),
+        ("Comp. Nocturnos", r["compNocturno"], "1 ud/día si fin ≥23:00 o (+1)", "ud"),
         ("Plus Nocturnidad", r["plusNoct"], "Horas completas 22:00-06:00", "h"),
     ]
     st.markdown(f"<div style='font-size:0.65rem; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:0.5rem;'>Conceptos hora · {r['per_rev']}</div>", unsafe_allow_html=True)
 
-    # Row 1: 4 concepts
     cols1 = st.columns(4)
     for i in range(4):
         label, val, tip, unit = concepts[i]
@@ -712,7 +743,6 @@ if "result" in st.session_state:
                 <div class="ctip">{tip}</div>
             </div>""", unsafe_allow_html=True)
 
-    # Row 2: 3 concepts
     cols2 = st.columns(4)
     for i in range(3):
         label, val, tip, unit = concepts[4 + i]
@@ -736,13 +766,16 @@ if "result" in st.session_state:
             df_det, use_container_width=True, hide_index=True,
             column_config={
                 "Fecha": st.column_config.TextColumn("Fecha", width="small"),
-                "Horas": st.column_config.NumberColumn("Horas", format="%.2f"),
+                "Horas (H)": st.column_config.NumberColumn("H", format="%.2f"),
+                "Plan+Abs (S)": st.column_config.NumberColumn("S", format="%.2f"),
                 "Tipo": st.column_config.TextColumn("Tipo", width="small"),
-                "Dif.L-V": st.column_config.NumberColumn("Dif. L-V", format="%.2f", help="Diferencia planificado vs registrado"),
+                "Comp.L-V": st.column_config.NumberColumn("Comp.L-V", format="%.2f", help="H − S en laborables"),
                 "Plus SDF": st.column_config.NumberColumn("Plus SDF", format="%.2f"),
                 "Fest.HComp": st.column_config.NumberColumn("Fest.HComp", format="%.2f"),
-                "H.Esp.": st.column_config.NumberColumn("H. Especiales", format="%.2f"),
-                "Comp.Fest.": st.column_config.NumberColumn("Comp. Fest.", format="%.2f"),
+                "H.Esp.": st.column_config.NumberColumn("H.Esp.", format="%.2f"),
+                "Comp.Fest": st.column_config.NumberColumn("C.Fest", help="1 ud sáb/dom H≥4"),
+                "Comp.Noct": st.column_config.NumberColumn("C.Noct", help="1 ud fin≥23:00"),
+                "Plus Noct": st.column_config.NumberColumn("P.Noct", format="%.0f", help="Horas 22-06"),
             },
         )
     else:
@@ -752,10 +785,10 @@ if "result" in st.session_state:
     if r["compNocturno"] > 0 or r["plusNoct"] > 0:
         st.markdown(f"""
         <div style="background:#eff6ff; border:1px solid #dbeafe; border-radius:10px; padding:0.8rem 1.2rem; margin-top:0.5rem;">
-            <div style="font-size:0.65rem; font-weight:700; color:#2563eb; text-transform:uppercase; margin-bottom:0.3rem;">Resumen Nocturnidad (desde Tramos)</div>
+            <div style="font-size:0.65rem; font-weight:700; color:#2563eb; text-transform:uppercase; margin-bottom:0.3rem;">Nocturnidad (cols N y O del informe)</div>
             <div style="font-size:0.8rem; color:#1e40af;">
-                <strong>{r['compNocturno']}</strong> días con comp. nocturno (fin ≥ 23:00) · 
-                <strong>{r['plusNoct']:.2f}h</strong> plus nocturnidad (horas completas 22:00-06:00)
+                <strong>{r['compNocturno']}</strong> días con comp. nocturno (fin ≥23:00 o (+1)) · 
+                <strong>{r['plusNoct']:.0f}h</strong> plus nocturnidad (horas completas 22-06)
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -766,7 +799,7 @@ elif not btn_calculate:
         <div style="width:80px; height:80px; border-radius:20px; background:#e8f6f6; display:flex; align-items:center; justify-content:center; margin-bottom:1.2rem; font-size:2rem;">📋</div>
         <div style="font-size:0.9rem; font-weight:800; color:#374151;">Panel de liquidación</div>
         <div style="font-size:0.75rem; color:#9ca3af; max-width:320px; text-align:center; margin-top:0.3rem; line-height:1.6;">
-            Carga los informes de Endalia y selecciona un empleado.<br>
+            Carga Contratos + Jornadas y selecciona empleado.<br>
             <strong style="color:#dc2626;">🔴 Con fecha fin</strong> = liquidación completa (horas + vacaciones)<br>
             <strong style="color:#16a34a;">🟢 Sin fecha fin</strong> = solo horas mensuales
         </div>
