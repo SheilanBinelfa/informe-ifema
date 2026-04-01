@@ -463,13 +463,13 @@ if btn_calculate and selected_emp:
         col_emp_j = find_col(df_jornadas, ["Empleado", "Nombre", "Persona"])
         col_fecha_j = find_col(df_jornadas, ["Día registro", "Fecha", "Día de registro"])
         col_H = find_col(df_jornadas, ["Tiempo trabajado", "Horas"])  # Col H
-        col_S = find_col(df_jornadas, ["PLANIFICADOYABSENTISMO", "Planificado y absentismo"])  # Col S
+        col_dif = find_col(df_jornadas, ["Diferencia con horas especiales", "Diferencia"])  # Col for Comp L-V
         col_tipo_fes = find_col(df_jornadas, ["Tipo de festivo"])  # Col E
         col_hora_ini = find_col(df_jornadas, ["Hora inicio jornada", "Hora inicio"])  # Col N
         col_hora_fin = find_col(df_jornadas, ["Hora fin jornada", "Hora fin"])  # Col O
 
-        if not col_S:
-            st.warning("⚠ No se encontró la columna 'PLANIFICADOYABSENTISMO' (col S). Comp. L-V puede no ser precisa.")
+        if not col_dif:
+            st.warning("⚠ No se encontró la columna 'Diferencia con horas especiales'. Comp. L-V no se calculará.")
 
         jornadas_emp = df_jornadas[
             df_jornadas[col_emp_j].apply(lambda x: normalize(x) == normalize(selected_emp))
@@ -497,7 +497,6 @@ if btn_calculate and selected_emp:
                 continue
 
             H = parse_float(row[col_H])
-            S = parse_float(row[col_S]) if col_S else 0.0
 
             if H <= 0:
                 continue
@@ -507,10 +506,8 @@ if btn_calculate and selected_emp:
             es_sdf = es_sabdom  # Sáb/dom always SDF
 
             if not es_sdf and col_tipo_fes:
-                # Check "Tipo de festivo" column for national/local holidays
                 tf = str(row.get(col_tipo_fes, "")).strip()
                 es_sdf = tf != "" and tf.lower() != "nan" and tf.lower() != "fin de semana"
-                # Also check if it says "Fin de semana" (safety)
                 if "fin de semana" in tf.lower():
                     es_sdf = True
                     es_sabdom = True
@@ -539,9 +536,10 @@ if btn_calculate and selected_emp:
                     dia_compFest = 1
                     compFestivo += 1
             else:
-                # 1. Complementarias L-V: H - S
-                dia_compLV = H - S
-                compLV += dia_compLV
+                # 1. Complementarias L-V: col Diferencia (solo laborables, nunca sáb/dom)
+                if col_dif:
+                    dia_compLV = parse_float(row[col_dif])
+                    compLV += dia_compLV
 
             # 4. Horas Especiales: any day, H > 11h → H - 11 (no cap)
             if H > 11:
@@ -568,7 +566,6 @@ if btn_calculate and selected_emp:
             detalle.append({
                 "Fecha": f.strftime("%d/%m/%Y"),
                 "Horas (H)": round(H, 2),
-                "Plan+Abs (S)": round(S, 2),
                 "Tipo": "Festivo" if es_sdf else "Laborable",
                 "Comp.L-V": round(dia_compLV, 2) if not es_sdf else None,
                 "Plus SDF": round(dia_plusSDF, 2) if es_sdf else None,
@@ -644,7 +641,7 @@ if btn_calculate and selected_emp:
             "compNocturno": compNocturno,
             "plusNoct": plusNoct,
             "detalle": detalle,
-            "col_S_found": col_S is not None,
+            "col_dif_found": col_dif is not None,
         }
         st.session_state["result"] = result
 
@@ -664,8 +661,8 @@ if "result" in st.session_state:
     else:
         st.markdown('<div class="mode-banner mode-mens">🟢 CÁLCULO MENSUAL — Empleado activo</div>', unsafe_allow_html=True)
 
-    if not r.get("col_S_found"):
-        st.warning("⚠ Columna 'PLANIFICADOYABSENTISMO' no encontrada. Comp. L-V se calculó como H - 0. Revisa el informe de Jornadas.")
+    if not r.get("col_dif_found"):
+        st.warning("⚠ Columna 'Diferencia con horas especiales' no encontrada. Comp. L-V será 0. Revisa el informe de Jornadas.")
 
     # Header + export
     col_head, col_export = st.columns([3, 1])
@@ -721,7 +718,7 @@ if "result" in st.session_state:
 
     # ─── 7 Concept cards ───
     concepts = [
-        ("Complem. L-V", r["compLV"], "H − S en laborables (neto)", "h"),
+        ("Complem. L-V", r["compLV"], "Σ col Diferencia en laborables (neto)", "h"),
         ("Plus SDF", r["plusSDF"], "min(H,7) en sáb/dom/fest", "h"),
         ("Festivo H.Comp.", r["festHComp"], "H − 7 si H>7 en festivos", "h"),
         ("Horas Especiales", r["hEspeciales"], "H > 11h → H − 11", "h"),
@@ -767,9 +764,8 @@ if "result" in st.session_state:
             column_config={
                 "Fecha": st.column_config.TextColumn("Fecha", width="small"),
                 "Horas (H)": st.column_config.NumberColumn("H", format="%.2f"),
-                "Plan+Abs (S)": st.column_config.NumberColumn("S", format="%.2f"),
                 "Tipo": st.column_config.TextColumn("Tipo", width="small"),
-                "Comp.L-V": st.column_config.NumberColumn("Comp.L-V", format="%.2f", help="H − S en laborables"),
+                "Comp.L-V": st.column_config.NumberColumn("Comp.L-V", format="%.2f", help="Col Diferencia en laborables"),
                 "Plus SDF": st.column_config.NumberColumn("Plus SDF", format="%.2f"),
                 "Fest.HComp": st.column_config.NumberColumn("Fest.HComp", format="%.2f"),
                 "H.Esp.": st.column_config.NumberColumn("H.Esp.", format="%.2f"),
